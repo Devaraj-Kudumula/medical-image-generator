@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+
+# Environment variables
+.env
+
+# Jupyter notebooks (may contain API keys)
+*.ipynb
+
+# Generated images
+generated_images/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# ngrok
+ngrok
+ngrok.zip
+
+# Temporary images
+generated_image*.png
+
+# Database files (if you want to exclude)
+chroma_db/

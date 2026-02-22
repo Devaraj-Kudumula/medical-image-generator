@@ -1,0 +1,16 @@
+# Render deployment configuration
+services:
+  - type: web
+    name: medical-image-generator
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 2 -b 0.0.0.0:$PORT --timeout 120 server:app
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GOOGLE_GENERATIVE_AI_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.8
