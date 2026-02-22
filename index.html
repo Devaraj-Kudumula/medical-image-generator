@@ -270,7 +270,7 @@ Output should read like a refined, publication-ready medical illustration brief 
             errorDiv.classList.remove('active');
 
             try {
-                const response = await fetch('http://localhost:5001/generate-prompt', {
+                const response = await fetch('/generate-prompt', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -314,7 +314,7 @@ Output should read like a refined, publication-ready medical illustration brief 
             successDiv.classList.remove('active');
 
             try {
-                const response = await fetch('http://localhost:5001/generate-image', {
+                const response = await fetch('/generate-image', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
