@@ -6,7 +6,7 @@ langchain-openai
 langchain-chroma==1.1.0
 langchain==1.2.10
 langchain-core==1.2.14
-langchain-community==0.0.20
+langchain-community
 langchain-classic==1.0.1
 chromadb==1.5.1
 google-genai==1.0.0
