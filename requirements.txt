@@ -2,7 +2,7 @@ Flask==2.3.3
 flask-cors==4.0.0
 requests==2.31.0
 openai==2.21.0
-langchain-openai==1.1.0
+langchain-openai
 langchain-chroma==1.1.0
 langchain==1.2.10
 langchain-core==1.2.14
