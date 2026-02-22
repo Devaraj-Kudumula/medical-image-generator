@@ -1,11 +1,15 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 import os
+import sys
+import logging
+import time
 from datetime import datetime
 import requests
 from pathlib import Path
 from typing import List
 from io import BytesIO
+import traceback
 
 # LangChain and OpenAI imports
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -17,40 +21,96 @@ from google import genai
 from google.genai import types
 from PIL import Image
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)
+    ]
+)
+logger = logging.getLogger(__name__)
+
+logger.info("="*60)
+logger.info("Starting AI Medical Image Generator Server")
+logger.info("="*60)
+
 app = Flask(__name__)
 CORS(app)
 
+logger.info("Flask app and CORS initialized")
+
 # Configure API keys
+logger.info("Checking API keys...")
 openai_api_key = os.getenv('OPENAI_API_KEY')
 google_api_key = os.getenv('GOOGLE_GENERATIVE_AI_API_KEY')
 
+if openai_api_key:
+    logger.info(f"✓ OpenAI API key found (length: {len(openai_api_key)})")
+else:
+    logger.error("✗ OpenAI API key not found!")
+
+if google_api_key:
+    logger.info(f"✓ Google API key found (length: {len(google_api_key)})")
+else:
+    logger.error("✗ Google API key not found!")
+
 # Create directory for generated images
+logger.info("Creating images directory...")
 IMAGES_DIR = Path('generated_images')
 IMAGES_DIR.mkdir(exist_ok=True)
+logger.info(f"✓ Images directory ready: {IMAGES_DIR}")
 
 # Initialize LLM
-llm = ChatOpenAI(
-    model="gpt-4",
-    temperature=0.1,
-    api_key=openai_api_key
-)
+logger.info("Initializing LLM...")
+try:
+    llm = ChatOpenAI(
+        model="gpt-4",
+        temperature=0.1,
+        api_key=openai_api_key
+    )
+    logger.info("✓ LLM initialized successfully")
+except Exception as e:
+    logger.error(f"✗ Failed to initialize LLM: {str(e)}")
+    llm = None
 
 # Initialize Google Gemini client for image generation
-gemini_client = genai.Client(api_key=google_api_key) if google_api_key else None
+logger.info("Initializing Gemini client...")
+try:
+    gemini_client = genai.Client(api_key=google_api_key) if google_api_key else None
+    if gemini_client:
+        logger.info("✓ Gemini client initialized successfully")
+    else:
+        logger.warning("⚠ Gemini client not initialized (no API key)")
+except Exception as e:
+    logger.error(f"✗ Failed to initialize Gemini client: {str(e)}")
+    gemini_client = None
 
 # Load vectorstore
-embedding_model = OpenAIEmbeddings(
-    model="text-embedding-3-small",
-    api_key=openai_api_key
-)
+logger.info("Initializing embedding model...")
+start_time = time.time()
+
+try:
+    embedding_model = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        api_key=openai_api_key
+    )
+    logger.info("✓ Embedding model initialized")
+except Exception as e:
+    logger.error(f"✗ Failed to initialize embedding model: {str(e)}")
+    embedding_model = None
 
 vectorstore = None
 retriever = None
 
 # Try to load vectorstore if it exists
 vectorstore_path = Path('./medical_vectorstore')
+logger.info(f"Checking vectorstore at: {vectorstore_path}")
+
 if vectorstore_path.exists():
+    logger.info("Vectorstore directory found. Loading...")
     try:
+        load_start = time.time()
         vectorstore = Chroma(
             persist_directory=str(vectorstore_path),
             embedding_function=embedding_model
@@ -59,16 +119,36 @@ if vectorstore_path.exists():
             search_type="mmr",
             search_kwargs={"k": 6}
         )
-        print("✓ Medical vectorstore loaded successfully")
+        load_time = time.time() - load_start
+        logger.info(f"✓ Medical vectorstore loaded successfully in {load_time:.2f}s")
     except Exception as e:
-        print(f"⚠️ Warning: Could not load vectorstore: {str(e)}")
+        logger.warning(f"⚠ Could not load vectorstore: {str(e)}")
+        logger.warning(traceback.format_exc())
 else:
-    print("⚠️ Warning: Medical vectorstore not found. RAG features will be limited.")
+    logger.warning("⚠ Medical vectorstore not found. RAG features will be limited.")
+
+total_init_time = time.time() - start_time
+logger.info(f"Total initialization time: {total_init_time:.2f}s")
 
 
 @app.route('/')
 def index():
+    logger.info("Serving index.html")
     return send_from_directory('.', 'index.html')
+
+
+@app.route('/health', methods=['GET'])
+def health():
+    """Health check endpoint for monitoring"""
+    status = {
+        'status': 'healthy',
+        'openai_configured': openai_api_key is not None,
+        'google_configured': google_api_key is not None,
+        'vectorstore_loaded': vectorstore is not None,
+        'gemini_client_ready': gemini_client is not None
+    }
+    logger.info(f"Health check: {status}")
+    return jsonify(status), 200
 
 
 @app.route('/generate-prompt', methods=['POST'])
@@ -76,19 +156,29 @@ def generate_prompt():
     """
     Generate a detailed image prompt using RAG-enhanced LLM based on system instruction
     """
+    request_start = time.time()
+    logger.info("="*50)
+    logger.info("[/generate-prompt] Request received")
+    
     try:
         data = request.get_json()
+        logger.info(f"Request data keys: {list(data.keys()) if data else 'None'}")
         system_instruction = data.get('system_instruction', '')
         user_question = data.get('user_question', 'A serene landscape at sunset')
         
         if not system_instruction:
+            logger.warning("Request missing system instruction")
             return jsonify({'error': 'System instruction is required'}), 400
         
         if not openai_api_key:
+            logger.error("OpenAI API key not configured")
             return jsonify({'error': 'OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.'}), 500
+        
+        logger.info(f"Question: {user_question[:100]}...")
         
         # Use RAG if vectorstore is available
         if retriever:
+            logger.info("Using RAG retrieval...")
             try:
                 # Extract retrieval query
                 extract_system = """Extract:
@@ -107,7 +197,9 @@ def generate_prompt():
                 retrieval_query = extract_response.content
                 
                 # Retrieve relevant documents
+                logger.info("Retrieving documents...")
                 docs = retriever.invoke(retrieval_query)
+                logger.info(f"Retrieved {len(docs)} documents")
                 context = "\n\n".join([doc.page_content for doc in docs])
                 
                 # Build final prompt with RAG context
@@ -121,15 +213,18 @@ def generate_prompt():
                     Return a complete structured image generation prompt following the system instruction guidelines.
                 """
                 
+                logger.info("Generating prompt with LLM...")
                 response = llm.invoke([
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": construction_prompt}
                 ])
                 
                 generated_prompt = response.content.strip()
+                logger.info(f"Generated prompt length: {len(generated_prompt)}")
                 
             except Exception as e:
-                print(f"RAG retrieval failed, using direct generation: {str(e)}")
+                logger.warning(f"RAG retrieval failed, using direct generation: {str(e)}")
+                logger.warning(traceback.format_exc())
                 # Fallback to direct generation without RAG
                 response = llm.invoke([
                     {"role": "system", "content": system_instruction},
@@ -137,6 +232,7 @@ def generate_prompt():
                 ])
                 generated_prompt = response.content.strip()
         else:
+            logger.info("Using direct generation (no RAG)")
             # Direct generation without RAG
             response = llm.invoke([
                 {"role": "system", "content": system_instruction},
@@ -144,12 +240,20 @@ def generate_prompt():
             ])
             generated_prompt = response.content.strip()
         
+        request_time = time.time() - request_start
+        logger.info(f"[/generate-prompt] Success in {request_time:.2f}s")
+        logger.info("="*50)
+        
         return jsonify({
             'prompt': generated_prompt,
             'success': True
         })
     
     except Exception as e:
+        request_time = time.time() - request_start
+        logger.error(f"[/generate-prompt] Error after {request_time:.2f}s: {str(e)}")
+        logger.error(traceback.format_exc())
+        logger.info("="*50)
         return jsonify({'error': f'Error generating prompt: {str(e)}'}), 500
 
 
@@ -158,28 +262,41 @@ def generate_image():
     """
     Generate an image using Google Gemini based on the provided prompt
     """
+    request_start = time.time()
+    logger.info("="*50)
+    logger.info("[/generate-image] Request received")
+    
     try:
         data = request.get_json()
+        logger.info(f"Request data keys: {list(data.keys()) if data else 'None'}")
         prompt = data.get('prompt', '')
         
         if not prompt:
+            logger.warning("Request missing prompt")
             return jsonify({'error': 'Prompt is required'}), 400
         
+        logger.info(f"Prompt length: {len(prompt)}")
+        
         if not google_api_key:
+            logger.error("Google API key not configured")
             return jsonify({'error': 'Google Generative AI API key not configured. Please set GOOGLE_GENERATIVE_AI_API_KEY environment variable.'}), 500
         
         if not gemini_client:
+            logger.error("Gemini client not initialized")
             return jsonify({'error': 'Gemini client not initialized'}), 500
         
-        print(f"Generating image with prompt: {prompt[:100]}...")
+        logger.info(f"Generating image with prompt: {prompt[:100]}...")
         
         # Call Gemini API to generate image
+        logger.info("Calling Gemini API...")
+        api_start = time.time()
         response = gemini_client.models.generate_content(
             model="gemini-3-pro-image-preview",
             contents=[prompt],
         )
-        
-        print(f"Response received. Extracting image...")
+        api_time = time.time() - api_start
+        logger.info(f"Gemini API response received in {api_time:.2f}s")
+        logger.info("Extracting image...")
         
         # Extract image from response (matching working notebook code)
         image_saved = False
@@ -191,26 +308,30 @@ def generate_image():
             # Access via candidates[0].content.parts (correct path based on working code)
             for part in response.candidates[0].content.parts:
                 if part.text:
-                    print(f"Text part found: {part.text[:100] if len(part.text) > 100 else part.text}")
+                    logger.info(f"Text part found: {part.text[:100] if len(part.text) > 100 else part.text}")
                 
                 elif part.inline_data:
-                    print("Image data found, saving...")
+                    logger.info("Image data found, saving...")
                     image = Image.open(BytesIO(part.inline_data.data))
                     image.save(str(filepath))
                     image_saved = True
-                    print(f"Image saved successfully to {filepath}")
+                    logger.info(f"Image saved successfully to {filepath}")
                     break
         except Exception as part_error:
-            print(f"Error extracting image from response: {str(part_error)}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error extracting image from response: {str(part_error)}")
+            logger.error(traceback.format_exc())
             return jsonify({'error': f'Error processing Gemini response: {str(part_error)}'}), 500
         
         if not image_saved:
+            logger.error("No image generated in response")
             return jsonify({'error': 'No image generated in response. Check server logs for details.'}), 500
         
         # Return the local URL for serving
         local_url = f'http://localhost:5001/images/{filename}'
+        
+        request_time = time.time() - request_start
+        logger.info(f"[/generate-image] Success in {request_time:.2f}s")
+        logger.info("="*50)
         
         return jsonify({
             'image_url': local_url,
@@ -219,6 +340,10 @@ def generate_image():
         })
     
     except Exception as e:
+        request_time = time.time() - request_start
+        logger.error(f"[/generate-image] Error after {request_time:.2f}s: {str(e)}")
+        logger.error(traceback.format_exc())
+        logger.info("="*50)
         return jsonify({'error': f'Error generating image: {str(e)}'}), 500
 
 
@@ -227,21 +352,22 @@ def serve_image(filename):
     """
     Serve generated images
     """
+    logger.info(f"Serving image: {filename}")
     return send_from_directory(IMAGES_DIR, filename)
 
 
 if __name__ == '__main__':
-    print("=" * 60)
-    print("AI Prompt to Image Generator Server")
-    print("=" * 60)
-    print("\nIMPORTANT: Make sure to set your OpenAI API key:")
-    print("  export OPENAI_API_KEY='your-api-key-here'")
+    logger.info("="*60)
+    logger.info("AI Prompt to Image Generator Server")
+    logger.info("="*60)
+    logger.info("IMPORTANT: Make sure to set your OpenAI API key:")
+    logger.info("  export OPENAI_API_KEY='your-api-key-here'")
     
     # Use PORT environment variable for deployment, default to 5001 for local
     port = int(os.environ.get('PORT', 5001))
-    print(f"\nServer starting on http://localhost:{port}")
-    print(f"Open your browser and navigate to http://localhost:{port}")
-    print("=" * 60)
+    logger.info(f"Server starting on http://localhost:{port}")
+    logger.info(f"Open your browser and navigate to http://localhost:{port}")
+    logger.info("="*60)
     
     # For production (Render, Railway, etc.), set host to 0.0.0.0
-    app.run(debug=True, host='0.0.0.0', port=port)
+    app.run(debug=False, host='0.0.0.0', port=port)
