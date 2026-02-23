@@ -123,9 +123,16 @@ try:
     )
     logger.info("✓ Embedding model initialized")
     
-    # Connect to MongoDB
+    # Connect to MongoDB with SSL configuration for Render compatibility
     logger.info(f"Connecting to MongoDB Atlas...")
-    mongo_client = MongoClient(MONGODB_URI)
+    mongo_client = MongoClient(
+        MONGODB_URI,
+        serverSelectionTimeoutMS=30000,  # 30 second timeout
+        connectTimeoutMS=30000,
+        socketTimeoutMS=30000,
+        tls=True,  # Force TLS
+        tlsAllowInvalidCertificates=True  # Allow for free tier environments
+    )
     
     # Test connection
     mongo_client.admin.command('ping')
