@@ -93,10 +93,19 @@ except Exception as e:
 logger.info("Initializing MongoDB connection...")
 start_time = time.time()
 
-MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb+srv://db_user:db_user@cluster0.9a1tk8o.mongodb.net/')
+MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb+srv://db_user:db_user@cluster0.9a1tk8o.mongodb.net/?retryWrites=true&w=majority')
 DB_NAME = "medical_rag"
 COLLECTION_NAME = "medical_documents"
 INDEX_NAME = "vector_index"
+
+# Log MongoDB connection details (masked)
+if MONGODB_URI:
+    masked_uri = MONGODB_URI[:30] + "..." + MONGODB_URI[-20:] if len(MONGODB_URI) > 50 else "URI_SET"
+    logger.info(f"MongoDB URI configured: {masked_uri}")
+else:
+    logger.error("✗ MONGODB_URI environment variable not set!")
+    
+logger.info(f"Target database: {DB_NAME}, collection: {COLLECTION_NAME}, index: {INDEX_NAME}")
 
 vectorstore = None
 retriever = None
@@ -150,7 +159,15 @@ try:
         
 except Exception as e:
     logger.error(f"✗ Failed to initialize MongoDB vectorstore: {str(e)}")
+    logger.error(f"Error type: {type(e).__name__}")
     logger.error(traceback.format_exc())
+    logger.error("="*60)
+    logger.error("TROUBLESHOOTING:")
+    logger.error("1. Verify MONGODB_URI environment variable is set in Render")
+    logger.error("2. Check MongoDB Atlas network access allows 0.0.0.0/0")
+    logger.error("3. Verify database credentials are correct")
+    logger.error("4. Ensure vector search index 'vector_index' exists")
+    logger.error("="*60)
     vectorstore = None
     retriever = None
     if mongo_client:
