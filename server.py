@@ -114,37 +114,53 @@ logger.info(f"Checking vectorstore at: {vectorstore_path}")
 
 if vectorstore_path.exists():
     logger.info("Vectorstore directory found. Loading...")
-    try:
-        load_start = time.time()
-        vectorstore = Chroma(
-            persist_directory=str(vectorstore_path),
-            embedding_function=embedding_model
-        )
-        # Use k=3 for faster retrieval on free tier
-        retriever = vectorstore.as_retriever(
-            search_type="similarity",
-            search_kwargs={"k": 3}
-        )
-        load_time = time.time() - load_start
-        logger.info(f"✓ Medical vectorstore loaded successfully in {load_time:.2f}s")
-        logger.info(f"✓ Retriever configured: similarity search with k=3")
-        
-        # Verify vectorstore has content
+    if embedding_model is None:
+        logger.error("✗ Cannot load vectorstore: embedding model not initialized")
+        logger.error("Check OPENAI_API_KEY environment variable")
+    else:
         try:
-            collection = vectorstore._collection
-            count = collection.count()
-            logger.info(f"✓ Vectorstore contains {count} documents")
-            if count == 0:
-                logger.warning("⚠ Vectorstore is empty!")
-                retriever = None
-        except Exception as count_error:
-            logger.warning(f"⚠ Could not verify document count: {str(count_error)}")
+            load_start = time.time()
+            logger.info(f"Loading from: {vectorstore_path.absolute()}")
             
-    except Exception as e:
-        logger.warning(f"⚠ Could not load vectorstore: {str(e)}")
-        logger.warning(traceback.format_exc())
+            vectorstore = Chroma(
+                persist_directory=str(vectorstore_path),
+                embedding_function=embedding_model
+            )
+            
+            # Verify vectorstore has content BEFORE creating retriever
+            try:
+                collection = vectorstore._collection
+                count = collection.count()
+                logger.info(f"✓ Vectorstore contains {count} documents")
+                
+                if count == 0:
+                    logger.error("✗ Vectorstore is EMPTY - no documents found")
+                    vectorstore = None
+                    retriever = None
+                else:
+                    # Use k=3 for faster retrieval on free tier
+                    retriever = vectorstore.as_retriever(
+                        search_type="similarity",
+                        search_kwargs={"k": 3}
+                    )
+                    load_time = time.time() - load_start
+                    logger.info(f"✓ Medical vectorstore loaded successfully in {load_time:.2f}s")
+                    logger.info(f"✓ Retriever configured: similarity search with k=3")
+                    
+            except Exception as count_error:
+                logger.error(f"✗ Failed to verify vectorstore content: {str(count_error)}")
+                logger.error(traceback.format_exc())
+                vectorstore = None
+                retriever = None
+                
+        except Exception as e:
+            logger.error(f"✗ Failed to load vectorstore: {str(e)}")
+            logger.error(traceback.format_exc())
+            vectorstore = None
+            retriever = None
 else:
-    logger.warning("⚠ Medical vectorstore not found. RAG features will be limited.")
+    logger.error(f"✗ Vectorstore directory not found at: {vectorstore_path.absolute()}")
+    logger.error("Make sure medical_vectorstore/ is included in your deployment")
 
 total_init_time = time.time() - start_time
 logger.info(f"Total initialization time: {total_init_time:.2f}s")
@@ -159,12 +175,22 @@ def index():
 @app.route('/health', methods=['GET'])
 def health():
     """Health check endpoint for monitoring"""
+    doc_count = 0
+    if vectorstore:
+        try:
+            doc_count = vectorstore._collection.count()
+        except:
+            doc_count = -1  # error getting count
+    
     status = {
         'status': 'healthy',
         'openai_configured': openai_api_key is not None,
         'google_configured': google_api_key is not None,
         'vectorstore_loaded': vectorstore is not None,
-        'gemini_client_ready': gemini_client is not None
+        'retriever_ready': retriever is not None,
+        'vectorstore_doc_count': doc_count,
+        'gemini_client_ready': gemini_client is not None,
+        'rag_available': retriever is not None and doc_count > 0
     }
     logger.info(f"Health check: {status}")
     return jsonify(status), 200
@@ -277,8 +303,14 @@ def generate_prompt():
                 generated_prompt = response.content.strip()
                 logger.info(f"✓ Fallback prompt generated ({len(generated_prompt)} chars)")
         else:
-            logger.error("RAG system not available - vectorstore not loaded")
-            return jsonify({'error': 'Medical knowledge base not available. Please contact administrator.'}), 503
+            logger.warning("⚠ RAG system not available, using direct generation without retrieval")
+            # Direct generation without RAG as fallback
+            response = llm.invoke([
+                {"role": "system", "content": system_instruction},
+                {"role": "user", "content": f"Create a detailed medical illustration prompt for: {user_question}"}
+            ])
+            generated_prompt = response.content.strip()
+            logger.info(f"✓ Direct prompt generated ({len(generated_prompt)} chars)")
         
         request_time = time.time() - request_start
         logger.info(f"[/generate-prompt] Success in {request_time:.2f}s")
