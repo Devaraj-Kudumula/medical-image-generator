@@ -11,6 +11,7 @@ from typing import List
 from io import BytesIO
 import traceback
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import certifi
 
 # LangChain and OpenAI imports
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -130,8 +131,7 @@ try:
         serverSelectionTimeoutMS=30000,  # 30 second timeout
         connectTimeoutMS=30000,
         socketTimeoutMS=30000,
-        tls=True,  # Force TLS
-        tlsAllowInvalidCertificates=True  # Allow for free tier environments
+        tlsCAFile=certifi.where()  # Use certifi's CA bundle for SSL certificates
     )
     
     # Test connection
