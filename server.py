@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import List
 from io import BytesIO
 import traceback
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 
 # LangChain and OpenAI imports
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
@@ -67,7 +68,8 @@ try:
     llm = ChatOpenAI(
         model="gpt-4",
         temperature=0.1,
-        api_key=openai_api_key
+        api_key=openai_api_key,
+        request_timeout=60  # 60 second timeout
     )
     logger.info("✓ LLM initialized successfully")
 except Exception as e:
@@ -93,9 +95,12 @@ start_time = time.time()
 try:
     embedding_model = OpenAIEmbeddings(
         model="text-embedding-3-small",
-        api_key=openai_api_key
+        api_key=openai_api_key,
+        request_timeout=45,  # 45 second timeout for cold starts
+        max_retries=2,       # Retry failed requests
+        show_progress_bar=False
     )
-    logger.info("✓ Embedding model initialized")
+    logger.info("✓ Embedding model initialized with retry support")
 except Exception as e:
     logger.error(f"✗ Failed to initialize embedding model: {str(e)}")
     embedding_model = None
@@ -115,12 +120,26 @@ if vectorstore_path.exists():
             persist_directory=str(vectorstore_path),
             embedding_function=embedding_model
         )
+        # Use k=3 for faster retrieval on free tier
         retriever = vectorstore.as_retriever(
-            search_type="mmr",
-            search_kwargs={"k": 6}
+            search_type="similarity",
+            search_kwargs={"k": 3}
         )
         load_time = time.time() - load_start
         logger.info(f"✓ Medical vectorstore loaded successfully in {load_time:.2f}s")
+        logger.info(f"✓ Retriever configured: similarity search with k=3")
+        
+        # Verify vectorstore has content
+        try:
+            collection = vectorstore._collection
+            count = collection.count()
+            logger.info(f"✓ Vectorstore contains {count} documents")
+            if count == 0:
+                logger.warning("⚠ Vectorstore is empty!")
+                retriever = None
+        except Exception as count_error:
+            logger.warning(f"⚠ Could not verify document count: {str(count_error)}")
+            
     except Exception as e:
         logger.warning(f"⚠ Could not load vectorstore: {str(e)}")
         logger.warning(traceback.format_exc())
@@ -178,7 +197,7 @@ def generate_prompt():
         
         # Use RAG if vectorstore is available
         if retriever:
-            logger.info("Using RAG retrieval...")
+            logger.info("Attempting RAG retrieval with timeout protection...")
             try:
                 # Extract retrieval query
                 extract_system = """Extract:
@@ -189,18 +208,43 @@ def generate_prompt():
                     Return short structured text only.
                 """
                 
+                logger.info("Extracting retrieval query...")
                 extract_response = llm.invoke([
                     {"role": "system", "content": extract_system},
                     {"role": "user", "content": user_question}
                 ])
                 
                 retrieval_query = extract_response.content
+                logger.info(f"Retrieval query: {retrieval_query[:150]}...")
                 
-                # Retrieve relevant documents
-                logger.info("Retrieving documents...")
-                docs = retriever.invoke(retrieval_query)
-                logger.info(f"Retrieved {len(docs)} documents")
+                # Retrieve documents with timeout protection (20 seconds for cold starts)
+                logger.info("Starting document retrieval (k=3 for speed)...")
+                
+                def retrieve_docs():
+                    try:
+                        return retriever.invoke(retrieval_query)
+                    except Exception as e:
+                        logger.error(f"Retriever invoke error: {str(e)}")
+                        raise
+                
+                with ThreadPoolExecutor(max_workers=1) as executor:
+                    future = executor.submit(retrieve_docs)
+                    try:
+                        docs = future.result(timeout=20)  # 20 second timeout for cold starts
+                        logger.info(f"✓ Retrieved {len(docs)} documents in time")
+                        
+                        if docs:
+                            logger.info(f"Doc 1: {docs[0].page_content[:80]}...")
+                        else:
+                            logger.warning("⚠ No documents retrieved, using direct generation")
+                            raise ValueError("No documents found")
+                    except FuturesTimeoutError:
+                        logger.error("✗ Document retrieval timed out after 20 seconds")
+                        logger.error("This may be due to cold start on free tier - retrying will be faster")
+                        raise TimeoutError("Embedding API timeout - please retry")
+                
                 context = "\n\n".join([doc.page_content for doc in docs])
+                logger.info(f"Context assembled ({len(context)} chars)")
                 
                 # Build final prompt with RAG context
                 construction_prompt = f"""
@@ -213,17 +257,17 @@ def generate_prompt():
                     Return a complete structured image generation prompt following the system instruction guidelines.
                 """
                 
-                logger.info("Generating prompt with LLM...")
+                logger.info("Generating prompt with RAG context...")
                 response = llm.invoke([
                     {"role": "system", "content": system_instruction},
                     {"role": "user", "content": construction_prompt}
                 ])
                 
                 generated_prompt = response.content.strip()
-                logger.info(f"Generated prompt length: {len(generated_prompt)}")
+                logger.info(f"✓ Generated prompt with RAG ({len(generated_prompt)} chars)")
                 
             except Exception as e:
-                logger.warning(f"RAG retrieval failed, using direct generation: {str(e)}")
+                logger.warning(f"⚠ RAG failed ({str(e)}), falling back to direct generation")
                 logger.warning(traceback.format_exc())
                 # Fallback to direct generation without RAG
                 response = llm.invoke([
@@ -231,14 +275,10 @@ def generate_prompt():
                     {"role": "user", "content": f"Create a detailed medical illustration prompt for: {user_question}"}
                 ])
                 generated_prompt = response.content.strip()
+                logger.info(f"✓ Fallback prompt generated ({len(generated_prompt)} chars)")
         else:
-            logger.info("Using direct generation (no RAG)")
-            # Direct generation without RAG
-            response = llm.invoke([
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": f"Create a detailed medical illustration prompt for: {user_question}"}
-            ])
-            generated_prompt = response.content.strip()
+            logger.error("RAG system not available - vectorstore not loaded")
+            return jsonify({'error': 'Medical knowledge base not available. Please contact administrator.'}), 503
         
         request_time = time.time() - request_start
         logger.info(f"[/generate-prompt] Success in {request_time:.2f}s")
