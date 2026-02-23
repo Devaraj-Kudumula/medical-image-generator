@@ -443,15 +443,17 @@ def generate_image():
             logger.error("No image generated in response")
             return jsonify({'error': 'No image generated in response. Check server logs for details.'}), 500
         
-        # Return the local URL for serving
-        local_url = f'http://localhost:5001/images/{filename}'
+        # Return the URL for serving (works for both local and deployed)
+        # Use request.host_url to get the current domain
+        image_url = f'{request.host_url}images/{filename}'
         
         request_time = time.time() - request_start
         logger.info(f"[/generate-image] Success in {request_time:.2f}s")
+        logger.info(f"Image URL: {image_url}")
         logger.info("="*50)
         
         return jsonify({
-            'image_url': local_url,
+            'image_url': image_url,
             'filename': filename,
             'success': True
         })
