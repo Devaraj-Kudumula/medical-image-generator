@@ -126,17 +126,38 @@ try:
     
     # Connect to MongoDB with SSL configuration for Render compatibility
     logger.info(f"Connecting to MongoDB Atlas...")
-    mongo_client = MongoClient(
-        MONGODB_URI,
-        serverSelectionTimeoutMS=30000,  # 30 second timeout
-        connectTimeoutMS=30000,
-        socketTimeoutMS=30000,
-        tlsCAFile=certifi.where()  # Use certifi's CA bundle for SSL certificates
-    )
-    
-    # Test connection
-    mongo_client.admin.command('ping')
-    logger.info("✓ MongoDB connection successful")
+    try:
+        # Try with tlsAllowInvalidCertificates for Render free tier
+        mongo_client = MongoClient(
+            MONGODB_URI,
+            serverSelectionTimeoutMS=30000,
+            connectTimeoutMS=30000,
+            socketTimeoutMS=30000,
+            tlsAllowInvalidCertificates=True,  # Bypass cert validation for free tier
+            retryWrites=True
+        )
+        
+        # Test connection
+        mongo_client.admin.command('ping')
+        logger.info("✓ MongoDB connection successful")
+    except Exception as conn_error:
+        logger.error(f"Connection attempt failed: {str(conn_error)}")
+        # Try fallback with ssl=false in connection string
+        logger.info("Attempting fallback connection without SSL...")
+        fallback_uri = MONGODB_URI
+        if '?' in fallback_uri:
+            fallback_uri += '&tls=false&tlsInsecure=true'
+        else:
+            fallback_uri += '?tls=false&tlsInsecure=true'
+        
+        mongo_client = MongoClient(
+            fallback_uri,
+            serverSelectionTimeoutMS=30000,
+            connectTimeoutMS=30000,
+            socketTimeoutMS=30000
+        )
+        mongo_client.admin.command('ping')
+        logger.info("✓ MongoDB connection successful (fallback mode)")
     
     # Get collection
     collection = mongo_client[DB_NAME][COLLECTION_NAME]
