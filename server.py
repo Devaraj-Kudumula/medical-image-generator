@@ -14,8 +14,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 
 # LangChain and OpenAI imports
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings
-from langchain_chroma import Chroma
+from langchain_mongodb import MongoDBAtlasVectorSearch
 from langchain_core.documents import Document
+from pymongo import MongoClient
 
 # Google Gemini for image generation
 from google import genai
@@ -88,79 +89,76 @@ except Exception as e:
     logger.error(f"✗ Failed to initialize Gemini client: {str(e)}")
     gemini_client = None
 
-# Load vectorstore
-logger.info("Initializing embedding model...")
+# MongoDB Configuration
+logger.info("Initializing MongoDB connection...")
 start_time = time.time()
 
-try:
-    embedding_model = OpenAIEmbeddings(
-        model="text-embedding-3-small",
-        api_key=openai_api_key,
-        request_timeout=45,  # 45 second timeout for cold starts
-        max_retries=2,       # Retry failed requests
-        show_progress_bar=False
-    )
-    logger.info("✓ Embedding model initialized with retry support")
-except Exception as e:
-    logger.error(f"✗ Failed to initialize embedding model: {str(e)}")
-    embedding_model = None
+MONGODB_URI = os.getenv('MONGODB_URI', 'mongodb+srv://db_user:db_user@cluster0.9a1tk8o.mongodb.net/')
+DB_NAME = "medical_rag"
+COLLECTION_NAME = "medical_documents"
+INDEX_NAME = "vector_index"
 
 vectorstore = None
 retriever = None
+mongo_client = None
 
-# Try to load vectorstore if it exists
-vectorstore_path = Path('./medical_vectorstore')
-logger.info(f"Checking vectorstore at: {vectorstore_path}")
-
-if vectorstore_path.exists():
-    logger.info("Vectorstore directory found. Loading...")
-    if embedding_model is None:
-        logger.error("✗ Cannot load vectorstore: embedding model not initialized")
-        logger.error("Check OPENAI_API_KEY environment variable")
+try:
+    # Initialize embeddings
+    logger.info("Initializing embedding model...")
+    embedding_model = OpenAIEmbeddings(
+        model="text-embedding-3-small",
+        api_key=openai_api_key,
+        request_timeout=45,
+        max_retries=2,
+        show_progress_bar=False
+    )
+    logger.info("✓ Embedding model initialized")
+    
+    # Connect to MongoDB
+    logger.info(f"Connecting to MongoDB Atlas...")
+    mongo_client = MongoClient(MONGODB_URI)
+    
+    # Test connection
+    mongo_client.admin.command('ping')
+    logger.info("✓ MongoDB connection successful")
+    
+    # Get collection
+    collection = mongo_client[DB_NAME][COLLECTION_NAME]
+    doc_count = collection.count_documents({})
+    logger.info(f"✓ Found {doc_count} documents in MongoDB collection")
+    
+    if doc_count == 0:
+        logger.warning("⚠ MongoDB collection is empty - run build_mongo_vectorstore.py first")
     else:
+        # Create vectorstore
+        logger.info("Initializing MongoDB Atlas Vector Search...")
+        vectorstore = MongoDBAtlasVectorSearch(
+            collection=collection,
+            embedding=embedding_model,
+            index_name=INDEX_NAME
+        )
+        
+        # Create retriever
+        retriever = vectorstore.as_retriever(
+            search_type="similarity",
+            search_kwargs={"k": 3}
+        )
+        
+        load_time = time.time() - start_time
+        logger.info(f"✓ MongoDB vectorstore loaded successfully in {load_time:.2f}s")
+        logger.info(f"✓ Retriever configured: similarity search with k=3")
+        
+except Exception as e:
+    logger.error(f"✗ Failed to initialize MongoDB vectorstore: {str(e)}")
+    logger.error(traceback.format_exc())
+    vectorstore = None
+    retriever = None
+    if mongo_client:
         try:
-            load_start = time.time()
-            logger.info(f"Loading from: {vectorstore_path.absolute()}")
-            
-            vectorstore = Chroma(
-                persist_directory=str(vectorstore_path),
-                embedding_function=embedding_model
-            )
-            
-            # Verify vectorstore has content BEFORE creating retriever
-            try:
-                collection = vectorstore._collection
-                count = collection.count()
-                logger.info(f"✓ Vectorstore contains {count} documents")
-                
-                if count == 0:
-                    logger.error("✗ Vectorstore is EMPTY - no documents found")
-                    vectorstore = None
-                    retriever = None
-                else:
-                    # Use k=3 for faster retrieval on free tier
-                    retriever = vectorstore.as_retriever(
-                        search_type="similarity",
-                        search_kwargs={"k": 3}
-                    )
-                    load_time = time.time() - load_start
-                    logger.info(f"✓ Medical vectorstore loaded successfully in {load_time:.2f}s")
-                    logger.info(f"✓ Retriever configured: similarity search with k=3")
-                    
-            except Exception as count_error:
-                logger.error(f"✗ Failed to verify vectorstore content: {str(count_error)}")
-                logger.error(traceback.format_exc())
-                vectorstore = None
-                retriever = None
-                
-        except Exception as e:
-            logger.error(f"✗ Failed to load vectorstore: {str(e)}")
-            logger.error(traceback.format_exc())
-            vectorstore = None
-            retriever = None
-else:
-    logger.error(f"✗ Vectorstore directory not found at: {vectorstore_path.absolute()}")
-    logger.error("Make sure medical_vectorstore/ is included in your deployment")
+            mongo_client.close()
+        except:
+            pass
+        mongo_client = None
 
 total_init_time = time.time() - start_time
 logger.info(f"Total initialization time: {total_init_time:.2f}s")
@@ -176,9 +174,10 @@ def index():
 def health():
     """Health check endpoint for monitoring"""
     doc_count = 0
-    if vectorstore:
+    if mongo_client:
         try:
-            doc_count = vectorstore._collection.count()
+            collection = mongo_client[DB_NAME][COLLECTION_NAME]
+            doc_count = collection.count_documents({})
         except:
             doc_count = -1  # error getting count
     
@@ -186,6 +185,7 @@ def health():
         'status': 'healthy',
         'openai_configured': openai_api_key is not None,
         'google_configured': google_api_key is not None,
+        'mongodb_connected': mongo_client is not None,
         'vectorstore_loaded': vectorstore is not None,
         'retriever_ready': retriever is not None,
         'vectorstore_doc_count': doc_count,
