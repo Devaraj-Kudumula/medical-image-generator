@@ -242,9 +242,15 @@ Output should read like a refined, publication-ready medical illustration brief 
                 <button onclick="downloadImage()" id="downloadBtn" style="display: none;">Download Image</button>
             </div>
         </div>
-    </div>
 
-    <script>
+        <!-- Suggest Changes Section -->
+        <div class="section">
+            <div class="section-title">Suggest Changes to Generated Image</div>
+            <textarea id="imageChanges" rows="4" placeholder="Describe the changes you want to make to the generated image..."></textarea>
+            <button onclick="suggestChanges()" id="suggestChangesBtn">Submit Changes</button>
+        </div>
+
+        <script>
         let currentImageUrl = null;
 
         async function generatePrompt() {
@@ -331,6 +337,58 @@ Output should read like a refined, publication-ready medical illustration brief 
                     showSuccess('imageSuccess', 'Image generated successfully!');
                 } else {
                     showError('imageError', data.error || 'Failed to generate image');
+                }
+            } catch (error) {
+                showError('imageError', 'Error connecting to server: ' + error.message);
+            } finally {
+                btn.disabled = false;
+                loading.classList.remove('active');
+            }
+        }
+
+        async function suggestChanges() {
+            const changes = document.getElementById('imageChanges').value;
+            const filename = currentImageUrl ? currentImageUrl.split('/').pop() : null;
+
+            if (!filename) {
+                showError('imageError', 'No image available to edit. Please generate an image first.');
+                return;
+            }
+
+            if (!changes.trim()) {
+                showError('imageError', 'Please describe the changes you want to make.');
+                return;
+            }
+
+            const btn = document.getElementById('suggestChangesBtn');
+            const loading = document.getElementById('imageLoading');
+            const errorDiv = document.getElementById('imageError');
+            const successDiv = document.getElementById('imageSuccess');
+
+            btn.disabled = true;
+            loading.classList.add('active');
+            errorDiv.classList.remove('active');
+            successDiv.classList.remove('active');
+
+            try {
+                const response = await fetch('/edit-image', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        filename: filename,
+                        changes: changes
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    displayImage(data.image_url);
+                    showSuccess('imageSuccess', 'Image updated successfully!');
+                } else {
+                    showError('imageError', data.error || 'Failed to update image');
                 }
             } catch (error) {
                 showError('imageError', 'Error connecting to server: ' + error.message);

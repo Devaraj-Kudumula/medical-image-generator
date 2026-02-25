@@ -472,7 +472,148 @@ def serve_image(filename):
     Serve generated images
     """
     logger.info(f"Serving image: {filename}")
-    return send_from_directory(IMAGES_DIR, filename)
+    return send_from_directory(IMAGES_DIR.resolve(), filename)
+
+
+@app.route('/edit-image', methods=['POST'])
+def edit_image():
+    """
+    Edit an existing image based on user-requested changes using Google Gemini.
+    """
+    request_start = time.time()
+    logger.info("="*50)
+    logger.info("[/edit-image] Request received")
+
+    try:
+        data = request.get_json()
+        logger.info(f"Request data keys: {list(data.keys()) if data else 'None'}")
+        filename = data.get('filename', '')
+        changes = data.get('changes', '')
+
+        if not filename:
+            logger.warning("Request missing filename")
+            return jsonify({'error': 'Filename is required'}), 400
+
+        if not changes:
+            logger.warning("Request missing changes")
+            return jsonify({'error': 'Changes are required'}), 400
+
+        logger.info(f"Filename: {filename}, Changes: {changes[:100]}...")
+
+        if not google_api_key:
+            logger.error("Google API key not configured")
+            return jsonify({'error': 'Google Generative AI API key not configured. Please set GOOGLE_GENERATIVE_AI_API_KEY environment variable.'}), 500
+
+        if not gemini_client:
+            logger.error("Gemini client not initialized")
+            return jsonify({'error': 'Gemini client not initialized'}), 500
+
+        # Check if the image exists
+        filepath = IMAGES_DIR / filename
+        if not filepath.exists():
+            logger.error(f"File not found: {filepath}")
+            return jsonify({'error': f'File not found: {filename}'}), 404
+
+        logger.info(f"Editing image: {filepath}")
+
+        # # Open the existing image
+        # with open(filepath, 'rb') as image_file:
+        #     image_data = image_file.read()
+
+        # # Wrap the image data in the appropriate structure
+        # from gemini_sdk.models import File
+        # wrapped_image_data = File(data=image_data, filename=filename)
+
+        image = Image.open(filepath)
+
+        # Generate a new image based on the existing image and changes
+        logger.info("Calling Gemini API for image editing...")
+        api_start = time.time()
+        prompt = f"Edit the following image based on the requested changes:\n\nChanges: {changes}"
+        try:
+            response = gemini_client.models.generate_content(
+                model="gemini-3-pro-image-preview",
+                contents=[prompt, image],
+            )
+            api_time = time.time() - api_start
+            logger.info(f"Gemini API response received in {api_time:.2f}s")
+            logger.debug(f"Gemini API response: {response}")
+        except Exception as api_error:
+            logger.error(f"Error calling Gemini API: {str(api_error)}")
+            logger.error(traceback.format_exc())
+            return jsonify({'error': f'Error calling Gemini API: {str(api_error)}'}), 500
+
+        # Extract the new image from the response
+        image_saved = False
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        new_filename = f'edited_{timestamp}.png'
+        new_filepath = IMAGES_DIR / new_filename
+
+        # Ensure the images directory exists
+        if not IMAGES_DIR.exists():
+            logger.warning(f"Images directory does not exist. Creating: {IMAGES_DIR}")
+            IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+
+        # Log the full path where the image will be saved
+        logger.info(f"Attempting to save image to path: {new_filepath}")
+
+        try:
+
+            for part in response.candidates[0].content.parts:
+                if part.text:
+                    logger.info(f"Text part found: {part.text[:100] if len(part.text) > 100 else part.text}")
+                
+                elif part.inline_data:
+                    logger.info("Image data found, saving...")
+                    image = Image.open(BytesIO(part.inline_data.data))
+                    image.save(str(filepath))
+                    image_saved = True
+                    logger.info(f"Image saved successfully to {filepath}")
+                    break
+            for part in response.candidates[0].content.parts:
+                if part.inline_data is not None:
+                    logger.info("Edited image data found, saving...")
+                    try:
+                        image = Image.open(BytesIO(part.inline_data.data))
+                        # image.verify()  # Verify image integrity
+                        # image = Image.open(BytesIO(part.inline_data))  # Reopen after verification
+                        image.save(str(new_filepath))
+                        image_saved = True
+                        logger.info(f"Edited image saved successfully to {new_filepath}")
+                        break
+                    except Exception as save_error:
+                        logger.error(f"Error saving image to path {new_filepath}: {str(save_error)}")
+                        logger.error(traceback.format_exc())
+                        return jsonify({'error': f'Error saving image: {str(save_error)}'}), 500
+        except Exception as part_error:
+            logger.error(f"Error extracting edited image from response: {str(part_error)}")
+            logger.error(traceback.format_exc())
+            return jsonify({'error': f'Error processing Gemini response: {str(part_error)}'}), 500
+
+        if not image_saved:
+            logger.error("No edited image generated in response")
+            return jsonify({'error': 'No edited image generated in response. Check server logs for details.'}), 500
+
+        # Return the URL for the new image
+        image_url = f'{request.host_url}images/{new_filename}'
+
+        request_time = time.time() - request_start
+        logger.info(f"[/edit-image] Success in {request_time:.2f}s")
+        logger.info(f"Edited Image URL: {image_url}")
+        logger.info("="*50)
+
+        return jsonify({
+            'image_url': image_url,
+            'filename': new_filename,
+            'success': True
+        })
+
+    except Exception as e:
+        request_time = time.time() - request_start
+        logger.error(f"[/edit-image] Error after {request_time:.2f}s: {str(e)}")
+        logger.error(traceback.format_exc())
+        logger.info("="*50)
+        return jsonify({'error': f'Error editing image: {str(e)}'}), 500
 
 
 if __name__ == '__main__':
